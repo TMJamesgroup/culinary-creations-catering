@@ -190,7 +190,7 @@ def concierge(q:ChatQuestion):
 
 # Management accounts use the same salted password hashes as customer accounts.
 # The existing ADMIN_TOKEN remains server-side as the session signing secret.
-OWNER_EMAIL=os.environ.get("OWNER_EMAIL","torrie@tmjamesgroup.com").strip().lower()
+OWNER_EMAIL=os.environ.get("OWNER_EMAIL","info@culinarycreationsgroup.com").strip().lower()
 def admin_id(request):
     token=request.headers.get("authorization","").removeprefix("Bearer ").strip()
     try:
@@ -207,14 +207,11 @@ def admin_auth(request):
 def admin_login(a:Account):
     email=a.email.strip().lower()
     if email!=OWNER_EMAIL: raise HTTPException(401,"Incorrect email or password")
-    with psycopg.connect(DATABASE_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id,password_hash,display_name FROM public.catering_customers WHERE email=%s",(email,))
-            row=cur.fetchone()
-    if not row or not check_password(a.password,row[1]): raise HTTPException(401,"Incorrect email or password")
-    data="admin:"+str(row[0])+":"+str(int(time.time()+86400))
+    stored=os.environ.get("OWNER_PASSWORD_HASH","")
+    if not stored or not check_password(a.password,stored): raise HTTPException(401,"Incorrect email or password")
+    data="admin:0:"+str(int(time.time()+86400))
     signature=hmac.new(ADMIN_TOKEN.encode(),data.encode(),hashlib.sha256).hexdigest()
-    return {"token":base64.urlsafe_b64encode((data+":"+signature).encode()).decode(),"name":row[2]}
+    return {"token":base64.urlsafe_b64encode((data+":"+signature).encode()).decode(),"name":"Culinary Creations Management"}
 class StatusUpdate(BaseModel):
     status: str
 @app.get("/api/admin/conversations")
