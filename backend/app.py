@@ -206,10 +206,11 @@ def admin_auth(request):
 @app.post("/api/admin/login")
 def admin_login(a:Account):
     email=a.email.strip().lower()
-    if email!=OWNER_EMAIL: raise HTTPException(401,"Incorrect email or password")
-    stored=os.environ.get("OWNER_PASSWORD_HASH","")
-    if not stored or not check_password(a.password,stored): raise HTTPException(401,"Incorrect email or password")
-    data="admin:0:"+str(int(time.time()+86400))
+    configured_email=os.environ.get("OWNER_EMAIL","info@culinarycreationsgroup.com").strip().lower()
+    password_hash=os.environ.get("OWNER_PASSWORD_HASH","")
+    if email!=configured_email or not password_hash or not check_password(a.password,password_hash):
+        raise HTTPException(401,"Incorrect email or password")
+    data="admin:1:"+str(int(time.time()+86400))
     signature=hmac.new(ADMIN_TOKEN.encode(),data.encode(),hashlib.sha256).hexdigest()
     return {"token":base64.urlsafe_b64encode((data+":"+signature).encode()).decode(),"name":"Culinary Creations Management"}
 class StatusUpdate(BaseModel):
