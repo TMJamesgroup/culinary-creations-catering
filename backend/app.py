@@ -380,3 +380,92 @@ def update_inquiry(inquiry_id:int,data:StatusUpdate,request:Request):
             cur.execute("UPDATE public.catering_inquiries SET status=%s WHERE id=%s RETURNING id",(data.status,inquiry_id))
             if not cur.fetchone(): raise HTTPException(404,"Inquiry not found")
     return {"saved":True}
+
+# Catering CRM: client projects and owner-controlled partner eligibility.
+class ProjectRequest(BaseModel):
+    title: str = Field(min_length=3,max_length=160)
+    event_date: str = Field(default="",max_length=40)
+    location: str = Field(default="",max_length=250)
+    guests: int | None = Field(default=None,ge=1,le=100000)
+    notes: str = Field(default="",max_length=4000)
+    kind: str = Field(default="event")
+class PartnerDecision(BaseModel):
+    tier: str = "pending"
+    notes: str = Field(default="",max_length=2000)
+def ensure_crm(cur):
+    cur.execute("""CREATE TABLE IF NOT EXISTS public.catering_crm_projects (
+        id BIGSERIAL PRIMARY KEY,
+        customer_id BIGINT NOT NULL REFERENCES public.catering_customers(id) ON DELETE CASCADE,
+        title TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'event',
+        event_date TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '',
+        guests INTEGER, notes TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'requested',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS public.catering_partner_accounts (
+        customer_id BIGINT PRIMARY KEY REFERENCES public.catering_customers(id) ON DELETE CASCADE,
+        tier TEXT NOT NULL DEFAULT 'pending', notes TEXT NOT NULL DEFAULT '',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+@app.post("/api/customer/projects",status_code=201)
+def create_project(data:ProjectRequest,request:Request):
+    ident=account_id(request)
+    throttle(request,"projects",20,3600)
+    if data.kind not in ("event","recurring","wholesale_bid"): raise HTTPException(422,"Invalid project type")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_crm(cur)
+            cur.execute("INSERT INTO public.catering_crm_projects(customer_id,title,kind,event_date,location,guests,notes) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",(ident,data.title.strip(),data.kind,data.event_date.strip(),data.location.strip(),data.guests,data.notes.strip()))
+            ident_project=cur.fetchone()[0]
+    return {"id":ident_project,"status":"requested"}
+@app.get("/api/customer/projects")
+def customer_projects(request:Request):
+    ident=account_id(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_crm(cur)
+            cur.execute("SELECT id,title,kind,event_date,location,guests,notes,status,created_at FROM public.catering_crm_projects WHERE customer_id=%s ORDER BY id DESC",(ident,))
+            projects=[{"id":r[0],"title":r[1],"kind":r[2],"event_date":r[3],"location":r[4],"guests":r[5],"notes":r[6],"status":r[7],"created_at":r[8].isoformat()} for r in cur.fetchall()]
+            cur.execute("SELECT tier FROM public.catering_partner_accounts WHERE customer_id=%s",(ident,))
+            partner=cur.fetchone()
+    return {"projects":projects,"partner_tier":partner[0] if partner else "not_approved"}
+@app.get("/api/admin/crm")
+def admin_crm(request:Request):
+    admin_auth(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_crm(cur)
+            cur.execute("""SELECT c.id,c.display_name,c.email,COALESCE(p.tier,'not_approved')
+                FROM public.catering_customers c LEFT JOIN public.catering_partner_accounts p ON p.customer_id=c.id
+                ORDER BY c.id DESC LIMIT 300""")
+            clients=[{"id":r[0],"name":r[1],"email":r[2],"tier":r[3]} for r in cur.fetchall()]
+            cur.execute("""SELECT p.id,p.customer_id,c.display_name,p.title,p.kind,p.event_date,p.status
+                FROM public.catering_crm_projects p JOIN public.catering_customers c ON c.id=p.customer_id
+                ORDER BY p.id DESC LIMIT 300""")
+            projects=[{"id":r[0],"customer_id":r[1],"client":r[2],"title":r[3],"kind":r[4],"event_date":r[5],"status":r[6]} for r in cur.fetchall()]
+    return {"clients":clients,"projects":projects}
+@app.put("/api/admin/partners/{customer_id}")
+def set_partner_tier(customer_id:int,data:PartnerDecision,request:Request):
+    admin_auth(request)
+    if data.tier not in ("pending","catering_20","reseller_30","reseller_35","white_label_40","white_label_50","declined"):
+        raise HTTPException(422,"Invalid tier")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_crm(cur)
+            cur.execute("SELECT 1 FROM public.catering_customers WHERE id=%s",(customer_id,))
+            if not cur.fetchone(): raise HTTPException(404,"Customer not found")
+            cur.execute("""INSERT INTO public.catering_partner_accounts(customer_id,tier,notes)
+                VALUES (%s,%s,%s) ON CONFLICT(customer_id) DO UPDATE
+                SET tier=EXCLUDED.tier,notes=EXCLUDED.notes,updated_at=NOW()""",(customer_id,data.tier,data.notes))
+    return {"saved":True,"customer_id":customer_id,"tier":data.tier}
+class ProjectStatus(BaseModel):
+    status: str
+@app.patch("/api/admin/projects/{project_id}")
+def admin_project_status(project_id:int,data:ProjectStatus,request:Request):
+    admin_auth(request)
+    if data.status not in ("requested","reviewing","quoted","approved","scheduled","completed","cancelled"):
+        raise HTTPException(422,"Invalid project status")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_crm(cur)
+            cur.execute("UPDATE public.catering_crm_projects SET status=%s WHERE id=%s RETURNING id",(data.status,project_id))
+            if not cur.fetchone(): raise HTTPException(404,"Project not found")
+    return {"saved":True}
