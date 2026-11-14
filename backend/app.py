@@ -683,3 +683,44 @@ def reseller_add_record(data:ResellerRecord,request:Request):
                         (tenant_id,data.record_type,Jsonb(data.payload)))
             record_id=cur.fetchone()[0]
     return {"id":record_id,"tenant_id":tenant_id,"status":"saved","supplier_committed":False}
+
+class FulfillmentDecision(BaseModel):
+    status: str
+    notes: str = Field(default="",max_length=1500)
+@app.get("/api/admin/reseller-fulfillment")
+def owner_fulfillment(request:Request):
+    admin_auth(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reseller_schema(cur)
+            cur.execute("""SELECT r.id,r.tenant_id,t.business_name,r.payload,r.created_at
+                FROM public.cc_reseller_records r JOIN public.cc_reseller_tenants t ON t.id=r.tenant_id
+                WHERE r.record_type='supplier_request' ORDER BY r.id DESC LIMIT 300""")
+            rows=cur.fetchall()
+    return {"requests":[{"id":r[0],"tenant_id":r[1],"business_name":r[2],
+        "payload":r[3],"created_at":r[4].isoformat()} for r in rows]}
+@app.patch("/api/admin/reseller-fulfillment/{request_id}")
+def owner_fulfillment_decision(request_id:int,data:FulfillmentDecision,request:Request):
+    admin_auth(request)
+    if data.status not in {"pending_review","approved","declined","scheduled","completed"}:
+        raise HTTPException(400,"Unsupported fulfillment status")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reseller_schema(cur)
+            cur.execute("""SELECT payload FROM public.cc_reseller_records
+                WHERE id=%s AND record_type='supplier_request' FOR UPDATE""",(request_id,))
+            row=cur.fetchone()
+            if not row: raise HTTPException(404,"Supplier request not found")
+            current=row[0]
+            old=current.get("status","pending_review")
+            transitions={"pending_review":{"approved","declined"},
+                "approved":{"scheduled","declined"},
+                "scheduled":{"completed"},
+                "declined":set(),"completed":set()}
+            if data.status!=old and data.status not in transitions.get(old,set()):
+                raise HTTPException(409,"Invalid fulfillment status transition")
+            updated={**current,"status":data.status,"supplier_notes":data.notes,
+                "reviewed_at":datetime.now(timezone.utc).isoformat()}
+            cur.execute("""UPDATE public.cc_reseller_records SET payload=%s,updated_at=NOW()
+                WHERE id=%s""",(Jsonb(updated),request_id))
+    return {"id":request_id,"status":data.status}
