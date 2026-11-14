@@ -678,6 +678,21 @@ def reseller_add_record(data:ResellerRecord,request:Request):
     valid={"menu","customer","event","quote","message","task","supplier_request"}
     if data.record_type not in valid: raise HTTPException(400,"Unsupported record type")
     if len(json.dumps(data.payload))>20000: raise HTTPException(413,"Record too large")
+    if data.record_type=="menu":
+        master_id=data.payload.get("master_id")
+        if not isinstance(master_id,int) or isinstance(master_id,bool):
+            raise HTTPException(400,"Invalid master menu item")
+        alias=str(data.payload.get("alias","")).strip()
+        if not alias or len(alias)>160:
+            raise HTTPException(400,"Menu item name must be 1–160 characters")
+        try: retail=float(data.payload.get("retail"))
+        except (TypeError,ValueError,OverflowError): raise HTTPException(400,"Invalid retail price")
+        import math
+        if not math.isfinite(retail) or not 0<=retail<=1000000:
+            raise HTTPException(400,"Invalid retail price")
+        data.payload={"master_id":master_id,"alias":alias,"retail":round(retail,2),
+                      "master_name":str(data.payload.get("master_name",""))[:160],
+                      "unit":str(data.payload.get("unit",""))[:80]}
     if data.record_type=="quote":
         import math
         lines=data.payload.get("lines")
