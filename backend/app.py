@@ -36,6 +36,29 @@ class Inquiry(BaseModel):
     kind: str
     payload: dict
     website: str = ""
+
+# Delivery quotes use server-side Google Routes API; never expose the key to browsers.
+class DeliveryRoute(BaseModel):
+    destination: str = Field(min_length=8,max_length=250)
+
+@app.post("/api/delivery/quote")
+def delivery_quote(data:DeliveryRoute, request:Request):
+    throttle(request,"delivery-route",12,300)
+    key=os.environ.get("GOOGLE_MAPS_API_KEY","")
+    if not key: raise HTTPException(503,"Automatic road mileage is temporarily unavailable")
+    import urllib.request, urllib.error
+    payload={"origin":{"address":"1036 Lafferty Lane, Dover, DE 19901"},"destination":{"address":data.destination.strip()},"travelMode":"DRIVE","routingPreference":"TRAFFIC_UNAWARE","units":"IMPERIAL"}
+    req=urllib.request.Request("https://routes.googleapis.com/directions/v2:computeRoutes",data=json.dumps(payload).encode(),headers={"Content-Type":"application/json","X-Goog-Api-Key":key,"X-Goog-FieldMask":"routes.distanceMeters"},method="POST")
+    try:
+        with urllib.request.urlopen(req,timeout=12) as resp:
+            result=json.load(resp)
+        meters=result["routes"][0]["distanceMeters"]
+    except (urllib.error.URLError,KeyError,IndexError,ValueError,TimeoutError):
+        raise HTTPException(422,"Unable to calculate driving distance. Please check the event address.")
+    miles=round(meters/1609.344,1)
+    charge=20 if miles<=15 else 30 if miles<=30 else 45 if miles<=50 else None
+    return {"origin":"1036 Lafferty Lane, Dover, DE 19901","destination":data.destination.strip(),"one_way_miles":miles,"delivery_fee":charge,"custom_quote":charge is None,"currency":"USD"}
+
 @app.get("/health")
 def health():
     try:
