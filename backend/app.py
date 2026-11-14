@@ -66,6 +66,23 @@ def submit(data:Inquiry, request:Request):
     if now-_recent.get(key,0)<5: raise HTTPException(429,"Please wait before submitting again")
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+            # Every inquiry belongs to a CRM customer record. Unverified email
+            # submissions never grant access to an existing customer's portal.
+            cur.execute("SELECT id FROM public.catering_customers WHERE email=%s",(email.lower(),))
+            existing=cur.fetchone()
+            if existing:
+                if customer is not None and customer!=existing[0]:
+                    raise HTTPException(403,"Signed-in account does not match inquiry email")
+                # Do not associate an unauthenticated inquiry with a preexisting
+                # account: an attacker must not inject requests into its portal.
+                if customer is not None: customer=existing[0]
+            else:
+                if customer is not None:
+                    raise HTTPException(403,"Please use the email on your account")
+                display=str(payload.get("client") or payload.get("contact") or payload.get("business") or "Customer")[:120]
+                random_password=secrets.token_urlsafe(48)
+                cur.execute("INSERT INTO public.catering_customers(email,password_hash,display_name) VALUES (%s,%s,%s) RETURNING id",(email.lower(),hash_password(random_password),display))
+                customer=cur.fetchone()[0]
             cur.execute("INSERT INTO public.catering_inquiries(kind,payload,customer_id) VALUES (%s,%s,%s) RETURNING id",(data.kind,Jsonb({**payload,"_management":lead_review(data.kind,payload)}),customer))
             ident=cur.fetchone()[0]
     _recent[key]=now
