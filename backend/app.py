@@ -11,6 +11,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["https://culinary-creations-ca
 DATABASE_URL=os.environ["DATABASE_URL"]
 ADMIN_TOKEN=os.environ["ADMIN_TOKEN"]
 _recent={}
+_rate_hits={}
 @app.middleware("http")
 async def security_headers(request:Request,call_next):
     response=await call_next(request)
@@ -26,10 +27,10 @@ def throttle(request,group,limit,window=300):
     now=time.time()
     identity=(request.client.host if request.client else "unknown")
     key=(group,identity)
-    hits=[t for t in _recent.get(key,[]) if now-t<window]
+    hits=[t for t in _rate_hits.get(key,[]) if now-t<window]
     if len(hits)>=limit: raise HTTPException(429,"Too many attempts. Please try again later.")
     hits.append(now)
-    _recent[key]=hits
+    _rate_hits[key]=hits
 
 class Inquiry(BaseModel):
     kind: str
@@ -96,6 +97,7 @@ class Account(BaseModel):
     email: str
     password: str
     name: str = ""
+    otp: str = ""
 class Message(BaseModel):
     body: str
     inquiry_id: int | None = None
@@ -239,7 +241,7 @@ def concierge(q:ChatQuestion,request:Request):
     else:
         reply="I'd be happy to help! We cater weddings, corporate events, private parties, BBQs, buffets and more throughout Delaware. Choose Full Menu to explore options, Event Proposal to request catering, or Partner With Us for wholesale inquiries. You can also email info@culinarycreationsgroup.com."
     if visitor: reply=visitor+", "+reply[0].lower()+reply[1:]
-    if "260" in question and ("wedding" in lower or any("wedding" in str(x).lower() for x in q.history)):
+    if False and "260" in question and ("wedding" in lower or any("wedding" in str(x).lower() for x in q.history)):
         reply=f"{visitor + ', ' if visitor else ''}for 260 wedding guests, our three published package bases are $9,087, $10,907 and $12,350. With the 22% full-service charge, preliminary totals are $11,086.14, $13,306.54 and $15,067, before any separately quoted services. What is your wedding date?"
     return {"reply":reply,"mode":"guided"}
 
@@ -258,6 +260,19 @@ def admin_id(request):
     except Exception: raise HTTPException(401,"Management sign-in required")
 def admin_auth(request):
     admin_id(request)
+def verify_owner_totp(code,secret):
+    try:
+        normalized=secret.replace(" ","").upper()
+        key=base64.b32decode(normalized+"="*((-len(normalized))%8))
+        if not re.fullmatch(r"\d{6}",code or ""): return False
+        counter=int(time.time()//30)
+        for drift in (-1,0,1):
+            digest=hmac.new(key,(counter+drift).to_bytes(8,"big"),hashlib.sha1).digest()
+            offset=digest[-1]&15
+            value=(int.from_bytes(digest[offset:offset+4],"big")&0x7fffffff)%1000000
+            if secrets.compare_digest(str(value).zfill(6),code): return True
+    except Exception: pass
+    return False
 @app.post("/api/admin/login")
 def admin_login(a:Account,request:Request):
     throttle(request,"admin_login",6,900)
@@ -266,7 +281,9 @@ def admin_login(a:Account,request:Request):
     password_hash=os.environ.get("OWNER_PASSWORD_HASH","")
     if email!=configured_email or not password_hash or not check_password(a.password,password_hash):
         raise HTTPException(401,"Incorrect email or password")
-    data="admin:1:"+str(int(time.time()+86400))
+    otp_secret=os.environ.get("OWNER_TOTP_SECRET","").strip()
+    if otp_secret and not verify_owner_totp(a.otp,otp_secret): raise HTTPException(401,"Valid authenticator code required")
+    data="admin:1:"+str(int(time.time()+8*3600))
     signature=hmac.new(ADMIN_TOKEN.encode(),data.encode(),hashlib.sha256).hexdigest()
     return {"token":base64.urlsafe_b64encode((data+":"+signature).encode()).decode(),"name":"Culinary Creations Management"}
 class StatusUpdate(BaseModel):
