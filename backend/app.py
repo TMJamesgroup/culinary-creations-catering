@@ -889,3 +889,18 @@ def rotate_reseller_access(tenant_id:int,request:Request):
                 VALUES(%s,%s,NOW()+INTERVAL '30 days')""",(tenant_id,hashlib.sha256(token.encode()).hexdigest()))
     return {"tenant_id":tenant_id,"invitation_token":token,"expires_in_days":30,
             "warning":"Copy and deliver securely; previous credentials are revoked."}
+
+# KurvPay/NMI gateway adapter readiness. No charges are enabled until the
+# catering merchant is configured, verified, and approved for production.
+KURV_GATEWAY_URL="https://kurv.transactiongateway.com/api/transact.php"
+@app.get("/api/admin/payments/kurv/status")
+def kurv_catering_status(request:Request):
+    admin_auth(request)
+    configured=bool(os.environ.get("CULINARY_KURV_SECURITY_KEY"))
+    tokenization_ready=bool(os.environ.get("CULINARY_KURV_TOKENIZATION_KEY"))
+    enabled=os.environ.get("CULINARY_KURV_LIVE_ENABLED","false").lower()=="true"
+    return {"provider":"KurvPay / NMI","merchant_configured":configured,
+            "tokenization_configured":tokenization_ready,
+            "live_enabled":False,
+            "integration_stage":"awaiting_merchant_verification" if configured and tokenization_ready else "credentials_required",
+            "note":"Charges remain disabled pending merchant verification and payment ledger tests."}
