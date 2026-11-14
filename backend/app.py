@@ -724,3 +724,52 @@ def owner_fulfillment_decision(request_id:int,data:FulfillmentDecision,request:R
             cur.execute("""UPDATE public.cc_reseller_records SET payload=%s,updated_at=NOW()
                 WHERE id=%s""",(Jsonb(updated),request_id))
     return {"id":request_id,"status":data.status}
+
+# Partner food-only wholesale discounts; never accept tier or costs from reseller payloads.
+WHOLESALE_TIERS={"catering_20":20,"reseller_30":30,"reseller_35":35,"white_label_40":40,"white_label_50":50}
+class PartnerTierUpdate(BaseModel):
+    tier: str
+@app.patch("/api/admin/resellers/{tenant_id}/tier")
+def assign_reseller_tier(tenant_id:int,data:PartnerTierUpdate,request:Request):
+    admin_auth(request)
+    if data.tier not in WHOLESALE_TIERS: raise HTTPException(400,"Unknown pricing tier")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reseller_schema(cur)
+            cur.execute("ALTER TABLE public.cc_reseller_tenants ADD COLUMN IF NOT EXISTS pricing_tier TEXT")
+            cur.execute("UPDATE public.cc_reseller_tenants SET pricing_tier=%s WHERE id=%s RETURNING id",
+                        (data.tier,tenant_id))
+            if not cur.fetchone(): raise HTTPException(404,"Reseller not found")
+    return {"tenant_id":tenant_id,"tier":data.tier,"discount_percent":WHOLESALE_TIERS[data.tier]}
+@app.get("/api/reseller/wholesale-pricing")
+def reseller_wholesale_pricing(request:Request):
+    tenant_id=reseller_identity(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reseller_schema(cur)
+            cur.execute("ALTER TABLE public.cc_reseller_tenants ADD COLUMN IF NOT EXISTS pricing_tier TEXT")
+            cur.execute("SELECT pricing_tier FROM public.cc_reseller_tenants WHERE id=%s",(tenant_id,))
+            row=cur.fetchone()
+    tier=row[0] if row else None
+    return {"tier":tier,"discount_percent":WHOLESALE_TIERS.get(tier),
+            "food_only":True,"full_service_fee_percent":15,
+            "excluded":["delivery","staffing","equipment","rentals","extras"],
+            "market_price_requires_approval":True}
+class WholesaleEstimate(BaseModel):
+    lines: list[dict] = Field(min_length=1,max_length=100)
+    full_service: bool = False
+@app.post("/api/reseller/wholesale-estimate")
+def reseller_wholesale_estimate(data:WholesaleEstimate,request:Request):
+    from decimal import Decimal,ROUND_HALF_UP
+    tenant_id=reseller_identity(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reseller_schema(cur)
+            cur.execute("ALTER TABLE public.cc_reseller_tenants ADD COLUMN IF NOT EXISTS pricing_tier TEXT")
+            cur.execute("SELECT pricing_tier FROM public.cc_reseller_tenants WHERE id=%s",(tenant_id,))
+            row=cur.fetchone()
+    tier=row[0] if row else None
+    if tier not in WHOLESALE_TIERS: raise HTTPException(403,"Wholesale tier not assigned by owner")
+    # Server-maintained reference catalog is required; never trust prices submitted by a reseller.
+    # Until source catalog is available server-side, estimates are intentionally unavailable.
+    raise HTTPException(503,"Server-side master food catalog validation required before estimates can be issued")
