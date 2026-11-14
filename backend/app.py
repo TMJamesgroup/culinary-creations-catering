@@ -678,6 +678,35 @@ def reseller_add_record(data:ResellerRecord,request:Request):
     valid={"menu","customer","event","quote","message","task","supplier_request"}
     if data.record_type not in valid: raise HTTPException(400,"Unsupported record type")
     if len(json.dumps(data.payload))>20000: raise HTTPException(413,"Record too large")
+    if data.record_type=="quote":
+        import math
+        lines=data.payload.get("lines")
+        if not isinstance(lines,list) or not 1<=len(lines)<=100:
+            raise HTTPException(400,"Quote must contain 1–100 items")
+        try:
+            customer_id=int(data.payload["customer_id"])
+            menu_ids=[int(line["menu_id"]) for line in lines]
+            quantities=[int(line["quantity"]) for line in lines]
+            prices=[float(line["price"]) for line in lines]
+        except (KeyError,TypeError,ValueError,OverflowError):
+            raise HTTPException(400,"Invalid quote details")
+        if any(q<1 or q>10000 for q in quantities) or any(not math.isfinite(p) or p<0 or p>1000000 for p in prices):
+            raise HTTPException(400,"Invalid quote quantity or price")
+        with psycopg.connect(DATABASE_URL) as verify_conn:
+            with verify_conn.cursor() as cur:
+                cur.execute("SELECT id FROM public.cc_reseller_records WHERE id=%s AND tenant_id=%s AND record_type='customer'",(customer_id,tenant_id))
+                if not cur.fetchone(): raise HTTPException(400,"Customer does not belong to this reseller")
+                cur.execute("SELECT id,payload FROM public.cc_reseller_records WHERE tenant_id=%s AND record_type='menu' AND id=ANY(%s)",(tenant_id,menu_ids))
+                menus={row[0]:row[1] for row in cur.fetchall()}
+        if len(menus)!=len(set(menu_ids)):
+            raise HTTPException(400,"Quote contains an unauthorized menu item")
+        validated=[]
+        for line,menu_id,q,p in zip(lines,menu_ids,quantities,prices):
+            m=menus[menu_id]
+            validated.append({"menu_id":menu_id,"master_id":m["master_id"],"menu_name":m["alias"],"quantity":q,"price":p})
+        data.payload={"customer_id":customer_id,"event":str(data.payload.get("event",""))[:300],
+                      "lines":validated,"total":round(sum(x["quantity"]*x["price"] for x in validated),2),
+                      "status":"draft","currency":"USD"}
     if data.record_type=="supplier_request":
         try:
             quote_id=int(data.payload["quote_id"])
