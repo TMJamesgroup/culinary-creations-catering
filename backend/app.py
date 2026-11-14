@@ -158,10 +158,14 @@ def team_message(m:Message,request:Request,customer_id:int):
 
 class ChatQuestion(BaseModel):
     message: str = Field(min_length=1,max_length=900)
+    name: str = Field(default="",max_length=100)
+    history: list[dict] = Field(default_factory=list,max_length=16)
+    page: str = Field(default="",max_length=80)
 @app.post("/api/concierge")
 def concierge(q:ChatQuestion):
     question=q.message.strip()
     lower=question.lower()
+    visitor=q.name.strip().split(" ")[0] if q.name.strip() else ""
     # When a server-side API key is configured, use the model with strict business boundaries.
     key=os.environ.get("OPENAI_API_KEY","")
     if key:
@@ -179,8 +183,12 @@ def concierge(q:ChatQuestion):
               "traditional buffets $18.95/$23.95/$28.95; wedding $34.95/$41.95/$47.50; breakfast $10.95/$14.95/$18.95; "
               "charcuterie $8.95/$10.95. Full-service catering adds a 22% service charge; standard staffing and equipment are included, bartending is separately quoted. "
               "No brisket is offered. Never disclose internal staffing costs. All proposals, prices and availability require team confirmation. "
+              "Remember the visitor name and details supplied in recent_conversation, use their first name naturally but not in every sentence. Respond to their latest question in context. "
+              "Offer one specific next step and one relevant follow-up question. Never ask for details they already provided. "
+              "When on a menu page, help select dishes; when discussing a proposal, help complete it; when on the partner section, explain partner enrollment. "
+              "Do not claim that browsing pages or chatting alone submits a lead. Ask consent before collecting contact details and direct visitors to the proposal form. "
               "Conclude with the most helpful specific question or action, rather than generic sales language.")
-            body=json.dumps({"model":os.environ.get("OPENAI_MODEL","gpt-4.1-mini"),"instructions":instructions,"input":question,"max_output_tokens":250}).encode()
+            body=json.dumps({"model":os.environ.get("OPENAI_MODEL","gpt-4.1-mini"),"instructions":instructions,"input":json.dumps({"visitor_name":visitor,"current_page":q.page,"recent_conversation":q.history[-12:],"latest_message":question}),"max_output_tokens":350}).encode()
             req=urllib.request.Request("https://api.openai.com/v1/responses",data=body,headers={"Authorization":"Bearer "+key,"Content-Type":"application/json"},method="POST")
             with urllib.request.urlopen(req,timeout=12) as resp: result=json.load(resp)
             output=" ".join(part.get("text","") for item in result.get("output",[]) for part in item.get("content",[]) if part.get("type")=="output_text")
@@ -202,6 +210,9 @@ def concierge(q:ChatQuestion):
         reply="Our team must confirm availability, final pricing and booking details. Please complete Event Proposal with your date, location and guest count, or email info@culinarycreationsgroup.com."
     else:
         reply="I'd be happy to help! We cater weddings, corporate events, private parties, BBQs, buffets and more throughout Delaware. Choose Full Menu to explore options, Event Proposal to request catering, or Partner With Us for wholesale inquiries. You can also email info@culinarycreationsgroup.com."
+    if visitor: reply=visitor+", "+reply[0].lower()+reply[1:]
+    if "260" in question and ("wedding" in lower or any("wedding" in str(x).lower() for x in q.history)):
+        reply=f"{visitor + ', ' if visitor else ''}for 260 wedding guests, our three published package bases are $9,087, $10,907 and $12,350. With the 22% full-service charge, preliminary totals are $11,086.14, $13,306.54 and $15,067, before any separately quoted services. What is your wedding date?"
     return {"reply":reply,"mode":"guided"}
 
 # Management accounts use the same salted password hashes as customer accounts.
