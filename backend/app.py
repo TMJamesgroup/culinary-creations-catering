@@ -848,3 +848,29 @@ def reseller_wholesale_estimate(data:WholesaleEstimate,request:Request):
             "estimated_total_excluding_extras":str(subtotal+fee),
             "estimate_only":True,"requires_supplier_approval":True,
             "excluded":["delivery","staffing","equipment","rentals","extras"]}
+
+@app.post("/api/admin/resellers/{tenant_id}/revoke-access")
+def revoke_reseller_access(tenant_id:int,request:Request):
+    admin_auth(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reseller_schema(cur)
+            cur.execute("SELECT id FROM public.cc_reseller_tenants WHERE id=%s",(tenant_id,))
+            if not cur.fetchone(): raise HTTPException(404,"Reseller not found")
+            cur.execute("DELETE FROM public.cc_reseller_access WHERE tenant_id=%s",(tenant_id,))
+            count=cur.rowcount
+    return {"tenant_id":tenant_id,"revoked_credentials":count}
+@app.post("/api/admin/resellers/{tenant_id}/rotate-access")
+def rotate_reseller_access(tenant_id:int,request:Request):
+    admin_auth(request)
+    token=secrets.token_urlsafe(48)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reseller_schema(cur)
+            cur.execute("SELECT id FROM public.cc_reseller_tenants WHERE id=%s AND status='approved'",(tenant_id,))
+            if not cur.fetchone(): raise HTTPException(404,"Approved reseller not found")
+            cur.execute("DELETE FROM public.cc_reseller_access WHERE tenant_id=%s",(tenant_id,))
+            cur.execute("""INSERT INTO public.cc_reseller_access(tenant_id,token_hash,expires_at)
+                VALUES(%s,%s,NOW()+INTERVAL '30 days')""",(tenant_id,hashlib.sha256(token.encode()).hexdigest()))
+    return {"tenant_id":tenant_id,"invitation_token":token,"expires_in_days":30,
+            "warning":"Copy and deliver securely; previous credentials are revoked."}
