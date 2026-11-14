@@ -771,6 +771,8 @@ def reseller_wholesale_estimate(data:WholesaleEstimate,request:Request):
             row=cur.fetchone()
     tier=row[0] if row else None
     if tier not in WHOLESALE_TIERS: raise HTTPException(403,"Wholesale tier not assigned by owner")
+    excluded_ids=[1030,1031,1032,1033,1034,1035,1036]
+    minimum_by_category={"1000":15,"1001":15,"1002":15,"1003":20,"1004":20,"1005":20,"1006":20,"1007":20,"1008":20,"1022":15,"1023":15,"1024":15}
     reference={"1000":[14.95,"person"],"1001":[17.95,"person"],"1002":[21.95,"person"],"1003":[16.95,"person"],"1004":[22.95,"person"],"1005":[29.95,"person"],"1006":[18.95,"person"],"1007":[23.95,"person"],"1008":[28.95,"person"],"1009":[14.95,"person"],"1010":[10.95,"person"],"1011":[10.95,"person"],"1012":[14.95,"person"],"1013":[10.95,"person"],"1014":[10.95,"person"],"1017":[8.95,"person"],"1018":[11.95,"person"],"1019":[14.95,"person"],"1020":[8.95,"person"],"1021":[10.95,"person"],"1022":[10.95,"person"],"1023":[14.95,"person"],"1024":[18.95,"person"],"1025":[3.5,"person"],"1026":[4.95,"person"],"1027":[4.95,"person"],"1028":[5.95,"person"],"1029":[7.95,"person"],"1030":[2.95,"person"],"1031":[4.95,"person"],"1032":[3,"person"],"1033":[4,"person"],"1034":[34.95,"person"],"1035":[41.95,"person"],"1036":[47.5,"person"],"2037":[60,"half pan"],"2038":[105,"full pan"],"2039":[65,"half pan"],"2040":[115,"full pan"],"2041":[80,"half pan"],"2042":[135,"full pan"],"2043":[80,"half pan"],"2044":[135,"full pan"],"2045":[70,"half pan"],"2046":[120,"full pan"],"2047":[70,"half pan"],"2048":[120,"full pan"],"2049":[80,"half pan"],"2050":[135,"full pan"],"2051":[65,"half pan"],"2052":[115,"full pan"],"2053":[60,"half pan"],"2054":[100,"full pan"],"2055":[70,"half pan"],"2056":[120,"full pan"],"2057":[50,"half pan"],"2058":[85,"full pan"],"2059":[50,"half pan"],"2060":[85,"full pan"],"2061":[40,"half pan"],"2062":[70,"full pan"],"2063":[40,"half pan"],"2064":[70,"full pan"],"2065":[35,"half pan"],"2066":[60,"full pan"],"2067":[35,"half pan"],"2068":[60,"full pan"],"2069":[40,"half pan"],"2070":[70,"full pan"],"2071":[35,"half pan"],"2072":[60,"full pan"],"2073":[35,"half pan"],"2074":[60,"full pan"],"2075":[40,"half pan"],"2076":[70,"full pan"],"2077":[40,"half pan"],"2078":[70,"full pan"],"2079":[35,"half pan"],"2080":[60,"full pan"],"2081":[30,"half pan"],"2082":[55,"full pan"],"2083":[35,"half pan"],"2084":[60,"full pan"],"4000":[60,"order"],"4001":[70,"order"],"4002":[50,"order"],"4003":[45,"order"],"4004":[75,"order"],"4005":[55,"order"],"4006":[90,"order"],"4007":[35,"order"],"4008":[65,"order"],"4009":[60,"order"],"4010":[105,"order"],"5001":[12.95,"person"],"5002":[15.95,"person"]}
     subtotal=Decimal("0")
     details=[]
@@ -780,13 +782,17 @@ def reseller_wholesale_estimate(data:WholesaleEstimate,request:Request):
             quantity=int(line["quantity"])
         except (KeyError,TypeError,ValueError): raise HTTPException(400,"Invalid menu item or quantity")
         if quantity<1 or quantity>10000: raise HTTPException(400,"Invalid quantity")
-        if item_id not in reference: raise HTTPException(400,"Custom or market-price items require manual approval")
+        if item_id not in reference or int(item_id) in excluded_ids: raise HTTPException(400,"This item requires a manual wholesale quote")
+        if item_id in minimum_by_category and quantity<minimum_by_category[item_id]:
+            raise HTTPException(400,"Guest count is below the catering minimum")
         unit_price=Decimal(str(reference[item_id][0]))
         base=unit_price*quantity
         discounted=(base*Decimal(100-WHOLESALE_TIERS[tier])/100).quantize(Decimal(".01"),rounding=ROUND_HALF_UP)
         subtotal+=discounted
         details.append({"master_id":int(item_id),"quantity":quantity,"unit":reference[item_id][1],
                         "reference_food_subtotal":str(base),"discounted_food_subtotal":str(discounted)})
+    if any(str(line.get("master_id")) in ["2037","2038","2039","2040","2041","2042","2043","2044","2045","2046","2047","2048","2049","2050","2051","2052","2053","2054","2055","2056","2057","2058","2059","2060","2061","2062","2063","2064","2065","2066","2067","2068","2069","2070","2071","2072","2073","2074","2075","2076","2077","2078","2079","2080","2081","2082","2083","2084","4000","4001","4002","4003","4004","4005","4006","4007","4008","4009","4010"] for line in data.lines) and subtotal<Decimal("150"):
+        raise HTTPException(400,"À la carte order is below the $150 minimum; request manual review")
     fee=(subtotal*Decimal(".15")).quantize(Decimal(".01"),rounding=ROUND_HALF_UP) if data.full_service else Decimal("0")
     return {"tier":tier,"discount_percent":WHOLESALE_TIERS[tier],"lines":details,
             "discounted_food_subtotal":str(subtotal),"full_service_fee":str(fee),
