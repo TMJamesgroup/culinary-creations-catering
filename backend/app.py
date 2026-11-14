@@ -587,3 +587,99 @@ def demo_put(data:DemoState,request:Request):
             VALUES (%s,%s) ON CONFLICT (session_hash) DO UPDATE SET
             state=EXCLUDED.state,updated_at=NOW()""",(sid,Jsonb(data.state)))
     return {"saved":True,"mode":"sandbox"}
+
+# TMJames Group owns the platform; Culinary Creations is the fulfillment business.
+# Production reseller API: separate tenant rows, owner-issued invitations and scoped access.
+def reseller_schema(cur):
+    cur.execute("""CREATE TABLE IF NOT EXISTS public.cc_reseller_tenants(
+      id BIGSERIAL PRIMARY KEY, business_name TEXT NOT NULL,
+      contact_email TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'approved',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS public.cc_reseller_access(
+      tenant_id BIGINT NOT NULL REFERENCES public.cc_reseller_tenants(id),
+      token_hash TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS public.cc_reseller_records(
+      id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL REFERENCES public.cc_reseller_tenants(id),
+      record_type TEXT NOT NULL, payload JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+class ResellerInvite(BaseModel):
+    business_name: str = Field(min_length=2,max_length=160)
+    contact_email: str = Field(min_length=5,max_length=254)
+class ResellerRecord(BaseModel):
+    record_type: str
+    payload: dict
+def reseller_identity(request):
+    token=request.headers.get("authorization","").removeprefix("Bearer ").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,100}",token):
+        raise HTTPException(401,"Reseller sign-in required")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reseller_schema(cur)
+            cur.execute("""SELECT a.tenant_id FROM public.cc_reseller_access a
+              JOIN public.cc_reseller_tenants t ON t.id=a.tenant_id
+              WHERE a.token_hash=%s AND a.expires_at>NOW() AND t.status='approved'""",
+              (hashlib.sha256(token.encode()).hexdigest(),))
+            row=cur.fetchone()
+    if not row: raise HTTPException(401,"Reseller access expired or revoked")
+    return row[0]
+@app.post("/api/admin/resellers")
+def create_reseller(data:ResellerInvite,request:Request):
+    admin_auth(request)
+    token=secrets.token_urlsafe(48)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reseller_schema(cur)
+            cur.execute("""INSERT INTO public.cc_reseller_tenants(business_name,contact_email)
+               VALUES(%s,%s) RETURNING id""",(data.business_name.strip(),data.contact_email.strip().lower()))
+            tenant_id=cur.fetchone()[0]
+            cur.execute("""INSERT INTO public.cc_reseller_access(tenant_id,token_hash,expires_at)
+               VALUES(%s,%s,NOW()+INTERVAL '30 days')""",
+               (tenant_id,hashlib.sha256(token.encode()).hexdigest()))
+    return {"tenant_id":tenant_id,"business_name":data.business_name,"invitation_token":token,
+            "warning":"Show this token once. Use secure invitation delivery. This is a temporary access mechanism, not a full login."}
+@app.get("/api/admin/resellers")
+def list_resellers(request:Request):
+    admin_auth(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            reseller_schema(cur)
+            cur.execute("SELECT id,business_name,contact_email,status FROM public.cc_reseller_tenants ORDER BY id DESC")
+            rows=cur.fetchall()
+    return {"owner":"TMJames Group","fulfillment":"Culinary Creations Catering",
+            "resellers":[{"id":r[0],"business_name":r[1],"contact_email":r[2],"status":r[3]} for r in rows]}
+@app.get("/api/reseller/me")
+def reseller_me(request:Request):
+    tenant_id=reseller_identity(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT business_name,contact_email FROM public.cc_reseller_tenants WHERE id=%s",(tenant_id,))
+            row=cur.fetchone()
+    return {"tenant_id":tenant_id,"business_name":row[0],"contact_email":row[1],
+            "platform_owner":"TMJames Group","supplier":"Culinary Creations Catering"}
+@app.get("/api/reseller/records")
+def reseller_records(request:Request,record_type:str=""):
+    tenant_id=reseller_identity(request)
+    valid={"menu","customer","event","quote","message","task","supplier_request"}
+    if record_type and record_type not in valid: raise HTTPException(400,"Unsupported record type")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            if record_type:
+                cur.execute("SELECT id,record_type,payload FROM public.cc_reseller_records WHERE tenant_id=%s AND record_type=%s ORDER BY id DESC LIMIT 500",(tenant_id,record_type))
+            else:
+                cur.execute("SELECT id,record_type,payload FROM public.cc_reseller_records WHERE tenant_id=%s ORDER BY id DESC LIMIT 500",(tenant_id,))
+            rows=cur.fetchall()
+    return {"records":[{"id":r[0],"record_type":r[1],"payload":r[2]} for r in rows]}
+@app.post("/api/reseller/records")
+def reseller_add_record(data:ResellerRecord,request:Request):
+    tenant_id=reseller_identity(request)
+    valid={"menu","customer","event","quote","message","task","supplier_request"}
+    if data.record_type not in valid: raise HTTPException(400,"Unsupported record type")
+    if len(json.dumps(data.payload))>20000: raise HTTPException(413,"Record too large")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO public.cc_reseller_records(tenant_id,record_type,payload) VALUES(%s,%s,%s) RETURNING id",
+                        (tenant_id,data.record_type,Jsonb(data.payload)))
+            record_id=cur.fetchone()[0]
+    return {"id":record_id,"tenant_id":tenant_id,"status":"saved","supplier_committed":False}
