@@ -45,10 +45,22 @@ def submit(data:Inquiry, request:Request):
     if now-_recent.get(key,0)<5: raise HTTPException(429,"Please wait before submitting again")
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO public.catering_inquiries(kind,payload,customer_id) VALUES (%s,%s,%s) RETURNING id",(data.kind,Jsonb(payload),customer))
+            cur.execute("INSERT INTO public.catering_inquiries(kind,payload,customer_id) VALUES (%s,%s,%s) RETURNING id",(data.kind,Jsonb({**payload,"_management":lead_review(data.kind,payload)}),customer))
             ident=cur.fetchone()[0]
     _recent[key]=now
     return {"accepted":True,"reference":f"CC-{ident:06d}"}
+def lead_review(kind,payload):
+    """Deterministic, auditable lead triage; no fabricated bookings or AI claims."""
+    fields=["date","guests","venue","eventtype","service"] if kind=="event" else ["phone","details"]
+    missing=[f for f in fields if not str(payload.get(f,"")).strip()]
+    guest_text=str(payload.get("guests","")).strip()
+    try: guests=int(guest_text)
+    except (ValueError,TypeError): guests=0
+    priority="high" if kind=="event" and guests>=100 else "normal"
+    next_step=("Request missing "+", ".join(missing) if missing else
+               "Review event requirements and prepare a proposal" if kind=="event" else
+               "Review partner eligibility and contact applicant")
+    return {"priority":priority,"missing":missing,"next_step":next_step,"reviewed_by":"automated intake","requires_staff_approval":True}
 @app.get("/api/admin/inquiries")
 def admin(request:Request):
     auth=request.headers.get("authorization","")
@@ -219,6 +231,18 @@ def admin_login(a:Account):
     return {"token":base64.urlsafe_b64encode((data+":"+signature).encode()).decode(),"name":"Culinary Creations Management"}
 class StatusUpdate(BaseModel):
     status: str
+@app.get("/api/admin/worklist")
+def admin_worklist(request:Request):
+    admin_auth(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id,kind,payload,status,created_at FROM public.catering_inquiries WHERE status NOT IN ('completed','declined') ORDER BY created_at DESC LIMIT 250")
+            rows=cur.fetchall()
+    tasks=[]
+    for ident,kind,payload,status,created in rows:
+        review=lead_review(kind,payload)
+        tasks.append({"id":ident,"kind":kind,"status":status,"customer":payload.get("client") or payload.get("business") or "Customer","email":payload.get("email",""),"priority":review["priority"],"next_step":review["next_step"],"age_days":max(0,(datetime.now(timezone.utc)-created.replace(tzinfo=timezone.utc) if created.tzinfo is None else datetime.now(timezone.utc)-created).days)})
+    return {"tasks":tasks,"open":len(tasks),"needs_followup":sum(t["age_days"]>=2 and t["status"] in ("new","reviewing") for t in tasks)}
 @app.get("/api/admin/conversations")
 def admin_conversations(request:Request):
     admin_auth(request)
