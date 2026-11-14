@@ -469,3 +469,80 @@ def admin_project_status(project_id:int,data:ProjectStatus,request:Request):
             cur.execute("UPDATE public.catering_crm_projects SET status=%s WHERE id=%s RETURNING id",(data.status,project_id))
             if not cur.fetchone(): raise HTTPException(404,"Project not found")
     return {"saved":True}
+
+# Project workspace: non-billing CRM documents, tasks, questionnaires, appointments.
+# Draft contracts and acknowledgements are not legally verified e-signatures.
+WORKSPACE_TYPES={"proposal","contract","questionnaire","task","appointment","note","document"}
+class WorkspaceItem(BaseModel):
+    project_id: int
+    item_type: str
+    title: str = Field(min_length=2,max_length=180)
+    content: str = Field(default="",max_length=12000)
+    due_date: str = Field(default="",max_length=40)
+    status: str = "draft"
+class WorkspaceChange(BaseModel):
+    status: str
+def ensure_workspace(cur):
+    ensure_crm(cur)
+    cur.execute("""CREATE TABLE IF NOT EXISTS public.catering_workspace_items (
+      id BIGSERIAL PRIMARY KEY, project_id BIGINT NOT NULL REFERENCES public.catering_crm_projects(id) ON DELETE CASCADE,
+      item_type TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL DEFAULT '',
+      due_date TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'draft',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS public.catering_workspace_activity (
+      id BIGSERIAL PRIMARY KEY, project_id BIGINT NOT NULL REFERENCES public.catering_crm_projects(id) ON DELETE CASCADE,
+      actor TEXT NOT NULL, action TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+def workspace_rows(cur,where,args):
+    cur.execute("SELECT w.id,w.project_id,w.item_type,w.title,w.content,w.due_date,w.status,w.created_at FROM public.catering_workspace_items w WHERE "+where+" ORDER BY w.id DESC LIMIT 500",args)
+    return [{"id":r[0],"project_id":r[1],"type":r[2],"title":r[3],"content":r[4],"due_date":r[5],"status":r[6],"created_at":r[7].isoformat()} for r in cur.fetchall()]
+@app.get("/api/customer/workspace")
+def customer_workspace(request:Request):
+    ident=account_id(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_workspace(cur)
+            return {"items":workspace_rows(cur,"w.project_id IN (SELECT id FROM public.catering_crm_projects WHERE customer_id=%s) AND w.status NOT IN ('draft','internal')",(ident,))}
+@app.get("/api/admin/workspace")
+def admin_workspace(request:Request):
+    admin_auth(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_workspace(cur)
+            return {"items":workspace_rows(cur,"TRUE",())}
+@app.post("/api/admin/workspace",status_code=201)
+def create_workspace_item(data:WorkspaceItem,request:Request):
+    admin_auth(request)
+    if data.item_type not in WORKSPACE_TYPES or data.status not in ("draft","shared","internal","completed","cancelled"):
+        raise HTTPException(422,"Invalid item type or status")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_workspace(cur)
+            cur.execute("SELECT 1 FROM public.catering_crm_projects WHERE id=%s",(data.project_id,))
+            if not cur.fetchone(): raise HTTPException(404,"Project not found")
+            cur.execute("""INSERT INTO public.catering_workspace_items(project_id,item_type,title,content,due_date,status)
+              VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",(data.project_id,data.item_type,data.title.strip(),data.content,data.due_date,data.status))
+            ident=cur.fetchone()[0]
+            cur.execute("INSERT INTO public.catering_workspace_activity(project_id,actor,action) VALUES (%s,'team',%s)",(data.project_id,"Created "+data.item_type+" #"+str(ident)))
+    return {"id":ident,"saved":True}
+@app.patch("/api/admin/workspace/{item_id}")
+def update_workspace_item(item_id:int,data:WorkspaceChange,request:Request):
+    admin_auth(request)
+    if data.status not in ("draft","shared","internal","completed","cancelled"):
+        raise HTTPException(422,"Invalid status")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_workspace(cur)
+            cur.execute("UPDATE public.catering_workspace_items SET status=%s,updated_at=NOW() WHERE id=%s RETURNING project_id",(data.status,item_id))
+            row=cur.fetchone()
+            if not row: raise HTTPException(404,"Item not found")
+            cur.execute("INSERT INTO public.catering_workspace_activity(project_id,actor,action) VALUES (%s,'team',%s)",(row[0],"Changed workspace item #"+str(item_id)+" to "+data.status))
+    return {"saved":True}
+@app.get("/api/admin/activity")
+def workspace_activity(request:Request):
+    admin_auth(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_workspace(cur)
+            cur.execute("SELECT a.project_id,a.actor,a.action,a.created_at FROM public.catering_workspace_activity a ORDER BY a.id DESC LIMIT 100")
+            rows=cur.fetchall()
+    return {"activity":[{"project_id":r[0],"actor":r[1],"action":r[2],"date":r[3].isoformat()} for r in rows]}
