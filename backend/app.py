@@ -139,3 +139,47 @@ def team_message(m:Message,request:Request,customer_id:int):
             cur.execute("INSERT INTO public.catering_messages(customer_id,inquiry_id,sender,body) VALUES (%s,%s,'team',%s) RETURNING id",(customer_id,m.inquiry_id,m.body.strip()))
             mid=cur.fetchone()[0]
     return {"saved":True,"id":mid}
+
+class ChatQuestion(BaseModel):
+    message: str = Field(min_length=1,max_length=900)
+@app.post("/api/concierge")
+def concierge(q:ChatQuestion):
+    question=q.message.strip()
+    lower=question.lower()
+    # When a server-side API key is configured, use the model with strict business boundaries.
+    key=os.environ.get("OPENAI_API_KEY","")
+    if key:
+        try:
+            import urllib.request
+            instructions=("You are the Culinary Creations Catering Concierge for a licensed and insured Delaware catering business. "
+              "Be helpful, warm and concise. Never invent availability, book events, claim payment, confirm orders, "
+              "approve wholesale discounts or reveal private staffing costs. Guide visitors to the Event Proposal form "
+              "or Partner With Us form for inquiries. Escalate sensitive issues to info@culinarycreationsgroup.com. "
+              "Published prices: Cold catering 14.95/17.95/21.95 per guest; Backyard BBQ 16.95/22.95/29.95; "
+              "buffets 18.95/23.95/28.95; wedding packages 34.95/41.95/47.50 plus 22% full-service charge; "
+              "breakfast 10.95/14.95/18.95; charcuterie 8.95/10.95; bartending separately quoted. "
+              "No brisket is offered. Standard full-service staffing and equipment are included. "
+              "All estimates require team confirmation. Do not disclose internal labor rates.")
+            body=json.dumps({"model":os.environ.get("OPENAI_MODEL","gpt-4.1-mini"),"instructions":instructions,"input":question,"max_output_tokens":250}).encode()
+            req=urllib.request.Request("https://api.openai.com/v1/responses",data=body,headers={"Authorization":"Bearer "+key,"Content-Type":"application/json"},method="POST")
+            with urllib.request.urlopen(req,timeout=12) as resp: result=json.load(resp)
+            output=" ".join(part.get("text","") for item in result.get("output",[]) for part in item.get("content",[]) if part.get("type")=="output_text")
+            if output.strip(): return {"reply":output.strip(),"mode":"ai"}
+        except Exception: pass
+    if any(w in lower for w in ["wholesale","partner","venue","planner","resell"]):
+        reply="We welcome wedding planners, venues, caterers and event professionals! Select Partner With Us to apply for a customized partnership. All wholesale rates are privately quoted."
+    elif any(w in lower for w in ["wedding","marriage","bride","groom"]):
+        reply="Our wedding packages start at $34.95, $41.95 and $47.50 per guest, plus a 22% full-service charge. Standard event staffing and equipment are included. Choose Event Proposal to plan your celebration."
+    elif any(w in lower for w in ["buffet","dinner","lunch"]):
+        reply="Our traditional buffets start at $18.95, $23.95 and $28.95 per guest. You can add menu selections in Full Menu, then create an Event Proposal."
+    elif any(w in lower for w in ["bbq","barbecue","cookout"]):
+        reply="Our BBQ packages start at $16.95, $22.95 and $29.95 per guest. Browse Full Menu and add your selections to an Event Proposal."
+    elif any(w in lower for w in ["breakfast","brunch"]):
+        reply="Breakfast packages start at $10.95, $14.95 and $18.95 per guest. We can customize your menu through the Event Proposal form."
+    elif any(w in lower for w in ["staff","server","service fee","22%"]):
+        reply="Standard staffing and food-service equipment are included with our full-service packages. A 22% service charge applies to full-service catering; bartending is quoted separately."
+    elif any(w in lower for w in ["book","available","date","reserve","deposit","payment"]):
+        reply="Our team must confirm availability, final pricing and booking details. Please complete Event Proposal with your date, location and guest count, or email info@culinarycreationsgroup.com."
+    else:
+        reply="I'd be happy to help! We cater weddings, corporate events, private parties, BBQs, buffets and more throughout Delaware. Choose Full Menu to explore options, Event Proposal to request catering, or Partner With Us for wholesale inquiries. You can also email info@culinarycreationsgroup.com."
+    return {"reply":reply,"mode":"guided"}
