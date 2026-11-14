@@ -187,3 +187,25 @@ def concierge(q:ChatQuestion):
     else:
         reply="I'd be happy to help! We cater weddings, corporate events, private parties, BBQs, buffets and more throughout Delaware. Choose Full Menu to explore options, Event Proposal to request catering, or Partner With Us for wholesale inquiries. You can also email info@culinarycreationsgroup.com."
     return {"reply":reply,"mode":"guided"}
+
+class StatusUpdate(BaseModel):
+    status: str
+@app.get("/api/admin/conversations")
+def admin_conversations(request:Request):
+    if not secrets.compare_digest(request.headers.get("authorization",""),"Bearer "+ADMIN_TOKEN): raise HTTPException(401,"Unauthorized")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT c.id,c.display_name,c.email,COUNT(m.id),MAX(m.created_at) FROM public.catering_customers c LEFT JOIN public.catering_messages m ON m.customer_id=c.id GROUP BY c.id,c.display_name,c.email ORDER BY MAX(m.created_at) DESC NULLS LAST LIMIT 250")
+            people=[{"id":r[0],"name":r[1],"email":r[2],"messages":r[3],"last_message":r[4].isoformat() if r[4] else None} for r in cur.fetchall()]
+            cur.execute("SELECT customer_id,inquiry_id,sender,body,created_at FROM public.catering_messages ORDER BY created_at ASC LIMIT 1000")
+            messages=[{"customer_id":r[0],"inquiry_id":r[1],"sender":r[2],"body":r[3],"created_at":r[4].isoformat()} for r in cur.fetchall()]
+    return {"customers":people,"messages":messages}
+@app.patch("/api/admin/inquiries/{inquiry_id}")
+def update_inquiry(inquiry_id:int,data:StatusUpdate,request:Request):
+    if not secrets.compare_digest(request.headers.get("authorization",""),"Bearer "+ADMIN_TOKEN): raise HTTPException(401,"Unauthorized")
+    if data.status not in ("new","reviewing","quoted","confirmed","completed","declined"): raise HTTPException(422,"Invalid status")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE public.catering_inquiries SET status=%s WHERE id=%s RETURNING id",(data.status,inquiry_id))
+            if not cur.fetchone(): raise HTTPException(404,"Inquiry not found")
+    return {"saved":True}
