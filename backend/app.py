@@ -142,6 +142,27 @@ def account_id(request):
         if int(expiry)<time.time() or not secrets.compare_digest(signature,valid): raise ValueError()
         return int(ident)
     except Exception: raise HTTPException(401,"Sign in required")
+class ActivateAccount(BaseModel):
+    email: str
+    password: str
+    token: str
+
+@app.post("/api/customer/activate")
+def activate_account(a:ActivateAccount,request:Request):
+    throttle(request,"activate",6,900)
+    if len(a.password)<12 or len(a.password)>128: raise HTTPException(422,"Password must be 12-128 characters")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{30,150}",a.token): raise HTTPException(400,"Invalid activation token")
+    digest=hashlib.sha256(a.token.encode()).hexdigest()
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE IF NOT EXISTS public.catering_activations (customer_id BIGINT PRIMARY KEY REFERENCES public.catering_customers(id) ON DELETE CASCADE, token_hash TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)")
+            cur.execute("SELECT c.id FROM public.catering_customers c JOIN public.catering_activations a ON a.customer_id=c.id WHERE c.email=%s AND a.token_hash=%s AND a.expires_at>NOW() FOR UPDATE OF a",(a.email.strip().lower(),digest))
+            row=cur.fetchone()
+            if not row: raise HTTPException(400,"Activation link invalid or expired")
+            cur.execute("UPDATE public.catering_customers SET password_hash=%s WHERE id=%s",(hash_password(a.password),row[0]))
+            cur.execute("DELETE FROM public.catering_activations WHERE customer_id=%s",(row[0],))
+    return {"token":make_session(row[0]),"activated":True}
+
 @app.post("/api/customer/register",status_code=201)
 def register(a:Account,request:Request):
     throttle(request,"register",8,3600)
