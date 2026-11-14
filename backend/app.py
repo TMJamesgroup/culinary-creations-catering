@@ -645,10 +645,11 @@ def list_resellers(request:Request):
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             reseller_schema(cur)
-            cur.execute("SELECT id,business_name,contact_email,status FROM public.cc_reseller_tenants ORDER BY id DESC")
+            cur.execute("ALTER TABLE public.cc_reseller_tenants ADD COLUMN IF NOT EXISTS pricing_tier TEXT")
+            cur.execute("SELECT id,business_name,contact_email,status,pricing_tier FROM public.cc_reseller_tenants ORDER BY id DESC")
             rows=cur.fetchall()
     return {"owner":"TMJames Group","fulfillment":"Culinary Creations Catering",
-            "resellers":[{"id":r[0],"business_name":r[1],"contact_email":r[2],"status":r[3]} for r in rows]}
+            "resellers":[{"id":r[0],"business_name":r[1],"contact_email":r[2],"status":r[3],"pricing_tier":r[4]} for r in rows]}
 @app.get("/api/reseller/me")
 def reseller_me(request:Request):
     tenant_id=reseller_identity(request)
