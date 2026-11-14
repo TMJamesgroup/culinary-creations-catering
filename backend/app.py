@@ -17,7 +17,14 @@ class Inquiry(BaseModel):
     website: str = ""
 @app.get("/health")
 def health():
-    return {"ok":True}
+    try:
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return {"ok":True,"database":"connected"}
+    except Exception:
+        raise HTTPException(503,"Database temporarily unavailable")
 @app.post("/api/inquiries", status_code=201)
 def submit(data:Inquiry, request:Request):
     if data.website: return {"accepted":True}
@@ -30,12 +37,13 @@ def submit(data:Inquiry, request:Request):
     if len(email)>254 or "@" not in email or "." not in email.split("@")[-1]: raise HTTPException(422,"Invalid email")
     ip=request.client.host if request.client else "unknown"
     now=time.time()
-    if now-_recent.get(ip,0)<15: raise HTTPException(429,"Please wait before submitting again")
+    key=ip+":"+email.lower()
+    if now-_recent.get(key,0)<5: raise HTTPException(429,"Please wait before submitting again")
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("INSERT INTO public.catering_inquiries(kind,payload) VALUES (%s,%s) RETURNING id",(data.kind,Jsonb(payload)))
             ident=cur.fetchone()[0]
-    _recent[ip]=now
+    _recent[key]=now
     return {"accepted":True,"reference":f"CC-{ident:06d}"}
 @app.get("/api/admin/inquiries")
 def admin(request:Request):
