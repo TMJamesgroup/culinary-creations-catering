@@ -250,6 +250,54 @@ def admin_customer_messages(request:Request,customer_id:int|None=None):
             rows=cur.fetchall()
     return {"messages":[{"id":x[0],"customer_id":x[1],"customer":x[2],"inquiry_id":x[3],"sender":x[4],"body":x[5],"created_at":x[6].isoformat()} for x in rows]}
 
+def ensure_savannah_sms(cur):
+    cur.execute("""CREATE TABLE IF NOT EXISTS public.catering_savannah_sms (
+        id BIGSERIAL PRIMARY KEY, message_sid TEXT UNIQUE NOT NULL,
+        sender TEXT NOT NULL, recipient TEXT NOT NULL,
+        body TEXT NOT NULL, customer_id BIGINT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+
+@app.post("/api/twilio/sms/inbound")
+async def savannah_sms_inbound(request:Request):
+    """Twilio inbound SMS webhook. Verify signed requests; do not auto-send."""
+    from urllib.parse import parse_qs
+    from xml.sax.saxutils import escape
+    token=os.environ.get("CULINARY_TWILIO_AUTH_TOKEN","")
+    url=os.environ.get("CULINARY_TWILIO_WEBHOOK_URL","")
+    if not token or not url:
+        raise HTTPException(503,"Twilio integration not configured")
+    raw=await request.body()
+    if len(raw)>12000: raise HTTPException(413,"Request too large")
+    params={k:v[0] for k,v in parse_qs(raw.decode("utf-8"),keep_blank_values=True).items()}
+    signed=url+"".join(k+params[k] for k in sorted(params))
+    expected=base64.b64encode(hmac.new(token.encode(),signed.encode(),hashlib.sha1).digest()).decode()
+    if not hmac.compare_digest(expected,request.headers.get("X-Twilio-Signature","")):
+        raise HTTPException(403,"Invalid webhook signature")
+    sid=params.get("MessageSid","")
+    sender=params.get("From","")
+    recipient=params.get("To","")
+    body=params.get("Body","")
+    if not re.fullmatch(r"SM[a-fA-F0-9]{32}",sid) or not sender.startswith("+") or not recipient.startswith("+") or len(body)>1600:
+        raise HTTPException(422,"Invalid message")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_savannah_sms(cur)
+            cur.execute("""INSERT INTO public.catering_savannah_sms(message_sid,sender,recipient,body)
+                VALUES (%s,%s,%s,%s) ON CONFLICT (message_sid) DO NOTHING""",(sid,sender,recipient,body))
+    from fastapi.responses import Response
+    return Response('<Response></Response>',media_type="application/xml")
+
+@app.get("/api/admin/savannah-sms")
+def savannah_sms_inbox(request:Request):
+    admin_auth(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_savannah_sms(cur)
+            cur.execute("SELECT id,sender,recipient,body,created_at FROM public.catering_savannah_sms ORDER BY id DESC LIMIT 100")
+            rows=cur.fetchall()
+    return {"messages":[{"id":x[0],"from":x[1],"to":x[2],"body":x[3],"created_at":x[4].isoformat()} for x in rows]}
+
 @app.post("/api/admin/messages",status_code=201)
 def team_message(m:Message,request:Request,customer_id:int):
     admin_auth(request)
