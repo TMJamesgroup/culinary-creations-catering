@@ -35,7 +35,11 @@ def submit(data:Inquiry, request:Request):
     if any(not str(payload.get(k,"")).strip() for k in required): raise HTTPException(422,"Missing required fields")
     email=str(payload["email"]).strip()
     if len(email)>254 or "@" not in email or "." not in email.split("@")[-1]: raise HTTPException(422,"Invalid email")
-    customer=None\n    if request.headers.get('authorization','').startswith('Bearer '):\n        try: customer=account_id(request)\n        except HTTPException: raise HTTPException(401,'Please sign in again')\n    ip=request.client.host if request.client else "unknown"
+    customer=None
+    if request.headers.get('authorization','').startswith('Bearer '):
+        try: customer=account_id(request)
+        except HTTPException: raise HTTPException(401,'Please sign in again')
+    ip=request.client.host if request.client else "unknown"
     now=time.time()
     key=ip+":"+email.lower()
     if now-_recent.get(key,0)<5: raise HTTPException(429,"Please wait before submitting again")
