@@ -11,6 +11,26 @@ app.add_middleware(CORSMiddleware, allow_origins=["https://culinary-creations-ca
 DATABASE_URL=os.environ["DATABASE_URL"]
 ADMIN_TOKEN=os.environ["ADMIN_TOKEN"]
 _recent={}
+@app.middleware("http")
+async def security_headers(request:Request,call_next):
+    response=await call_next(request)
+    response.headers["X-Content-Type-Options"]="nosniff"
+    response.headers["Referrer-Policy"]="strict-origin-when-cross-origin"
+    response.headers["X-Frame-Options"]="DENY"
+    response.headers["Cache-Control"]="no-store" if request.url.path.startswith("/api/") else "public, max-age=60"
+    response.headers["Permissions-Policy"]="camera=(), microphone=(), geolocation=()"
+    return response
+
+def throttle(request,group,limit,window=300):
+    # In-process limit is a temporary defense; distributed rate limiting is needed across instances.
+    now=time.time()
+    identity=(request.client.host if request.client else "unknown")
+    key=(group,identity)
+    hits=[t for t in _recent.get(key,[]) if now-t<window]
+    if len(hits)>=limit: raise HTTPException(429,"Too many attempts. Please try again later.")
+    hits.append(now)
+    _recent[key]=hits
+
 class Inquiry(BaseModel):
     kind: str
     payload: dict
@@ -104,7 +124,8 @@ def account_id(request):
         return int(ident)
     except Exception: raise HTTPException(401,"Sign in required")
 @app.post("/api/customer/register",status_code=201)
-def register(a:Account):
+def register(a:Account,request:Request):
+    throttle(request,"register",8,3600)
     email=a.email.strip().lower()
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email) or len(email)>254: raise HTTPException(422,"Valid email required")
     if len(a.password)<12 or len(a.password)>128: raise HTTPException(422,"Password must be 12-128 characters")
@@ -117,7 +138,8 @@ def register(a:Account):
         return {"token":make_session(ident),"name":a.name.strip()}
     except psycopg.errors.UniqueViolation: raise HTTPException(409,"Account already exists; sign in")
 @app.post("/api/customer/login")
-def login(a:Account):
+def login(a:Account,request:Request):
+    throttle(request,"customer_login",10,300)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id,password_hash,display_name FROM public.catering_customers WHERE email=%s",(a.email.strip().lower(),))
@@ -152,6 +174,11 @@ def team_message(m:Message,request:Request,customer_id:int):
     if not m.body.strip() or len(m.body)>3000: raise HTTPException(422,"Invalid message")
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM public.catering_customers WHERE id=%s",(customer_id,))
+            if not cur.fetchone(): raise HTTPException(404,"Customer not found")
+            if m.inquiry_id:
+                cur.execute("SELECT 1 FROM public.catering_inquiries WHERE id=%s AND customer_id=%s",(m.inquiry_id,customer_id))
+                if not cur.fetchone(): raise HTTPException(403,"Inquiry does not belong to this customer")
             cur.execute("INSERT INTO public.catering_messages(customer_id,inquiry_id,sender,body) VALUES (%s,%s,'team',%s) RETURNING id",(customer_id,m.inquiry_id,m.body.strip()))
             mid=cur.fetchone()[0]
     return {"saved":True,"id":mid}
@@ -162,7 +189,8 @@ class ChatQuestion(BaseModel):
     history: list[dict] = Field(default_factory=list,max_length=16)
     page: str = Field(default="",max_length=80)
 @app.post("/api/concierge")
-def concierge(q:ChatQuestion):
+def concierge(q:ChatQuestion,request:Request):
+    throttle(request,"concierge",35,300)
     question=q.message.strip()
     lower=question.lower()
     visitor=q.name.strip().split(" ")[0] if q.name.strip() else ""
@@ -231,7 +259,8 @@ def admin_id(request):
 def admin_auth(request):
     admin_id(request)
 @app.post("/api/admin/login")
-def admin_login(a:Account):
+def admin_login(a:Account,request:Request):
+    throttle(request,"admin_login",6,900)
     email=a.email.strip().lower()
     configured_email=os.environ.get("OWNER_EMAIL","info@culinarycreationsgroup.com").strip().lower()
     password_hash=os.environ.get("OWNER_PASSWORD_HASH","")
