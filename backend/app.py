@@ -7,7 +7,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 app = FastAPI(title="Culinary Creations Inquiries", docs_url=None, redoc_url=None)
-app.add_middleware(CORSMiddleware, allow_origins=["https://culinary-creations-catering.onrender.com"], allow_methods=["POST","GET"], allow_headers=["Content-Type","Authorization"])
+app.add_middleware(CORSMiddleware, allow_origins=["https://culinary-creations-catering.onrender.com","https://culinary-creations-product-demo.onrender.com"], allow_methods=["POST","GET","PUT","PATCH"], allow_headers=["Content-Type","Authorization"])
 DATABASE_URL=os.environ["DATABASE_URL"]
 ADMIN_TOKEN=os.environ["ADMIN_TOKEN"]
 _recent={}
@@ -546,3 +546,44 @@ def workspace_activity(request:Request):
             cur.execute("SELECT a.project_id,a.actor,a.action,a.created_at FROM public.catering_workspace_activity a ORDER BY a.id DESC LIMIT 100")
             rows=cur.fetchall()
     return {"activity":[{"project_id":r[0],"actor":r[1],"action":r[2],"date":r[3].isoformat()} for r in rows]}
+
+# Isolated shared demo backend. Each visitor receives an opaque demo session token.
+# Demo state never queries or modifies live catering customer/partner tables.
+class DemoState(BaseModel):
+    state: dict
+def demo_schema(cur):
+    cur.execute("""CREATE TABLE IF NOT EXISTS public.catering_demo_sessions (
+      session_hash TEXT PRIMARY KEY, state JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+def demo_ident(request):
+    token=request.headers.get("Authorization","").removeprefix("Bearer ").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,100}",token):
+        raise HTTPException(401,"Demo session required")
+    return hashlib.sha256(token.encode()).hexdigest()
+@app.post("/api/demo/session")
+def demo_session(request:Request):
+    throttle(request,"demo-session",30,300)
+    token=secrets.token_urlsafe(48)
+    return {"demo_token":token,"mode":"sandbox","production_access":False}
+@app.get("/api/demo/state")
+def demo_get(request:Request):
+    sid=demo_ident(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            demo_schema(cur)
+            cur.execute("SELECT state FROM public.catering_demo_sessions WHERE session_hash=%s",(sid,))
+            row=cur.fetchone()
+    return {"state":row[0] if row else None,"mode":"sandbox"}
+@app.put("/api/demo/state")
+def demo_put(data:DemoState,request:Request):
+    sid=demo_ident(request)
+    raw=json.dumps(data.state)
+    if len(raw)>100000: raise HTTPException(413,"Demo state too large")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            demo_schema(cur)
+            cur.execute("""INSERT INTO public.catering_demo_sessions(session_hash,state)
+            VALUES (%s,%s) ON CONFLICT (session_hash) DO UPDATE SET
+            state=EXCLUDED.state,updated_at=NOW()""",(sid,Jsonb(data.state)))
+    return {"saved":True,"mode":"sandbox"}
