@@ -678,6 +678,26 @@ def reseller_add_record(data:ResellerRecord,request:Request):
     valid={"menu","customer","event","quote","message","task","supplier_request"}
     if data.record_type not in valid: raise HTTPException(400,"Unsupported record type")
     if len(json.dumps(data.payload))>20000: raise HTTPException(413,"Record too large")
+    if data.record_type=="supplier_request":
+        try:
+            quote_id=int(data.payload["quote_id"])
+        except (KeyError,TypeError,ValueError):
+            raise HTTPException(400,"A saved quote is required")
+        with psycopg.connect(DATABASE_URL) as verify_conn:
+            with verify_conn.cursor() as verify_cur:
+                verify_cur.execute("""SELECT payload FROM public.cc_reseller_records
+                    WHERE id=%s AND tenant_id=%s AND record_type='quote'""",(quote_id,tenant_id))
+                quote_row=verify_cur.fetchone()
+                if not quote_row: raise HTTPException(404,"Quote not found for this reseller")
+                verify_cur.execute("""SELECT id FROM public.cc_reseller_records
+                    WHERE tenant_id=%s AND record_type='supplier_request'
+                    AND payload->>'quote_id'=%s LIMIT 1""",(tenant_id,str(quote_id)))
+                if verify_cur.fetchone(): raise HTTPException(409,"A supplier request already exists for this quote")
+        quote_lines=quote_row[0].get("lines",[])
+        if not isinstance(quote_lines,list) or not quote_lines:
+            raise HTTPException(400,"Quote has no order lines")
+        data.payload={"quote_id":quote_id,"lines":quote_lines,"status":"pending_review"}
+
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("INSERT INTO public.cc_reseller_records(tenant_id,record_type,payload) VALUES(%s,%s,%s) RETURNING id",
