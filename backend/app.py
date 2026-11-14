@@ -52,7 +52,7 @@ def submit(data:Inquiry, request:Request):
 @app.get("/api/admin/inquiries")
 def admin(request:Request):
     auth=request.headers.get("authorization","")
-    if not secrets.compare_digest(auth,"Bearer "+ADMIN_TOKEN): raise HTTPException(401,"Unauthorized")
+    admin_auth(request)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id,kind,payload,status,created_at FROM public.catering_inquiries ORDER BY created_at DESC LIMIT 250")
@@ -136,7 +136,7 @@ def customer_message(m:Message,request:Request):
     return {"saved":True,"id":mid}
 @app.post("/api/admin/messages",status_code=201)
 def team_message(m:Message,request:Request,customer_id:int):
-    if not secrets.compare_digest(request.headers.get("authorization",""),"Bearer "+ADMIN_TOKEN): raise HTTPException(401,"Unauthorized")
+    admin_auth(request)
     if not m.body.strip() or len(m.body)>3000: raise HTTPException(422,"Invalid message")
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
@@ -188,11 +188,38 @@ def concierge(q:ChatQuestion):
         reply="I'd be happy to help! We cater weddings, corporate events, private parties, BBQs, buffets and more throughout Delaware. Choose Full Menu to explore options, Event Proposal to request catering, or Partner With Us for wholesale inquiries. You can also email info@culinarycreationsgroup.com."
     return {"reply":reply,"mode":"guided"}
 
+# Management accounts use the same salted password hashes as customer accounts.
+# The existing ADMIN_TOKEN remains server-side as the session signing secret.
+OWNER_EMAIL=os.environ.get("OWNER_EMAIL","torrie@tmjamesgroup.com").strip().lower()
+def admin_id(request):
+    token=request.headers.get("authorization","").removeprefix("Bearer ").strip()
+    try:
+        raw=base64.urlsafe_b64decode(token.encode()).decode()
+        prefix,ident,expiry,signature=raw.split(":")
+        message="admin:"+ident+":"+expiry
+        expected=hmac.new(ADMIN_TOKEN.encode(),message.encode(),hashlib.sha256).hexdigest()
+        if prefix!="admin" or int(expiry)<time.time() or not secrets.compare_digest(signature,expected): raise ValueError()
+        return int(ident)
+    except Exception: raise HTTPException(401,"Management sign-in required")
+def admin_auth(request):
+    admin_id(request)
+@app.post("/api/admin/login")
+def admin_login(a:Account):
+    email=a.email.strip().lower()
+    if email!=OWNER_EMAIL: raise HTTPException(401,"Incorrect email or password")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id,password_hash,display_name FROM public.catering_customers WHERE email=%s",(email,))
+            row=cur.fetchone()
+    if not row or not check_password(a.password,row[1]): raise HTTPException(401,"Incorrect email or password")
+    data="admin:"+str(row[0])+":"+str(int(time.time()+86400))
+    signature=hmac.new(ADMIN_TOKEN.encode(),data.encode(),hashlib.sha256).hexdigest()
+    return {"token":base64.urlsafe_b64encode((data+":"+signature).encode()).decode(),"name":row[2]}
 class StatusUpdate(BaseModel):
     status: str
 @app.get("/api/admin/conversations")
 def admin_conversations(request:Request):
-    if not secrets.compare_digest(request.headers.get("authorization",""),"Bearer "+ADMIN_TOKEN): raise HTTPException(401,"Unauthorized")
+    admin_auth(request)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT c.id,c.display_name,c.email,COUNT(m.id),MAX(m.created_at) FROM public.catering_customers c LEFT JOIN public.catering_messages m ON m.customer_id=c.id GROUP BY c.id,c.display_name,c.email ORDER BY MAX(m.created_at) DESC NULLS LAST LIMIT 250")
@@ -202,7 +229,7 @@ def admin_conversations(request:Request):
     return {"customers":people,"messages":messages}
 @app.patch("/api/admin/inquiries/{inquiry_id}")
 def update_inquiry(inquiry_id:int,data:StatusUpdate,request:Request):
-    if not secrets.compare_digest(request.headers.get("authorization",""),"Bearer "+ADMIN_TOKEN): raise HTTPException(401,"Unauthorized")
+    admin_auth(request)
     if data.status not in ("new","reviewing","quoted","confirmed","completed","declined"): raise HTTPException(422,"Invalid status")
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
