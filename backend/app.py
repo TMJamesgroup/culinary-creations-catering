@@ -231,6 +231,25 @@ def customer_message(m:Message,request:Request):
             cur.execute("INSERT INTO public.catering_messages(customer_id,inquiry_id,sender,body) VALUES (%s,%s,'customer',%s) RETURNING id",(ident,m.inquiry_id,m.body.strip()))
             mid=cur.fetchone()[0]
     return {"saved":True,"id":mid}
+@app.get("/api/admin/customer-messages")
+def admin_customer_messages(request:Request,customer_id:int|None=None):
+    admin_auth(request)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            ensure_crm(cur)
+            if customer_id is not None:
+                cur.execute("SELECT id FROM public.catering_customers WHERE id=%s",(customer_id,))
+                if not cur.fetchone(): raise HTTPException(404,"Customer not found")
+                cur.execute("""SELECT m.id,m.customer_id,c.display_name,m.inquiry_id,m.sender,m.body,m.created_at
+                    FROM public.catering_messages m JOIN public.catering_customers c ON c.id=m.customer_id
+                    WHERE m.customer_id=%s ORDER BY m.created_at DESC LIMIT 150""",(customer_id,))
+            else:
+                cur.execute("""SELECT m.id,m.customer_id,c.display_name,m.inquiry_id,m.sender,m.body,m.created_at
+                    FROM public.catering_messages m JOIN public.catering_customers c ON c.id=m.customer_id
+                    ORDER BY m.created_at DESC LIMIT 150""")
+            rows=cur.fetchall()
+    return {"messages":[{"id":x[0],"customer_id":x[1],"customer":x[2],"inquiry_id":x[3],"sender":x[4],"body":x[5],"created_at":x[6].isoformat()} for x in rows]}
+
 @app.post("/api/admin/messages",status_code=201)
 def team_message(m:Message,request:Request,customer_id:int):
     admin_auth(request)
