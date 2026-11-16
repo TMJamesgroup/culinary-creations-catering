@@ -286,21 +286,33 @@ async def savannah_sms_inbound(request:Request):
             cur.execute("""INSERT INTO public.catering_savannah_sms(message_sid,sender,recipient,body)
                 VALUES (%s,%s,%s,%s) ON CONFLICT (message_sid) DO NOTHING""",(sid,sender,recipient,body))
     from fastapi.responses import Response
-    # An immediate TwiML response acknowledges an inquiry without promising
-    # an unverified quote, date, or booking. Twilio sends it as the SMS reply.
-    # A2P 10DLC registration and carrier restrictions may prevent delivery.
-    # Keep replies opt-in until registration and delivery are verified.
+    # Reply only to inbound customer texts when the owner has enabled replies.
+    # Twilio sends the TwiML response; no outbound SMS credentials are required.
+    # This is guided intake, not autonomous booking or AI-generated pricing.
     if os.environ.get("CULINARY_SAVANNAH_SMS_AUTO_REPLY","false").lower()=="true" and body.strip():
         incoming=body.strip().lower()
         if incoming in ("stop","stopall","unsubscribe","cancel","end","quit"):
             return Response('<Response></Response>',media_type="application/xml")
         if incoming in ("help","info"):
-            reply="Culinary Creations Catering: Tell us your event date, location, guest count, and catering needs. Reply STOP to opt out."
+            reply="Culinary Creations Catering: Send your event date, location, guest count, and menu or service preferences. Reply STOP to opt out."
         else:
-            reply=("Thank you for contacting Culinary Creations Catering! "
-                   "Please share your event date, location, approximate guest count, "
-                   "and the catering service you need. Our team will review your request. "
-                   "Reply STOP to opt out.")
+            with psycopg.connect(DATABASE_URL) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""SELECT body FROM public.catering_savannah_sms
+                        WHERE sender=%s AND recipient=%s ORDER BY created_at DESC, id DESC LIMIT 12""",(sender,recipient))
+                    history=[row[0].lower() for row in cur.fetchall()]
+            combined=" ".join(history)
+            has_date=bool(re.search(r"\\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\\d{1,2}[/-]\\d{1,2}(?:[/-]\\d{2,4})?)\\b",combined))
+            has_guests=bool(re.search(r"\\b\\d{1,4}\\s*(?:guests?|people|persons?|attendees?)\\b",combined))
+            has_location=bool(re.search(r"\\b(?:at|in|venue|location|address|city|town)\\s+[a-z]",combined))
+            if not has_date:
+                reply="Hi, this is Savannah with Culinary Creations Catering. What date is your event? Reply STOP to opt out."
+            elif not has_guests:
+                reply="Thanks! Approximately how many guests are you expecting? Reply STOP to opt out."
+            elif not has_location:
+                reply="Great. What city or venue will your event be held at? Reply STOP to opt out."
+            else:
+                reply="Thank you! What food, menu, or service style would you like? Our catering team will review the details and follow up; no date or quote is confirmed yet. Reply STOP to opt out."
         return Response('<Response><Message>'+escape(reply)+'</Message></Response>',media_type="application/xml")
     return Response('<Response></Response>',media_type="application/xml")
 
