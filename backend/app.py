@@ -302,9 +302,9 @@ async def savannah_sms_inbound(request:Request):
                         WHERE sender=%s AND recipient=%s ORDER BY created_at DESC, id DESC LIMIT 12""",(sender,recipient))
                     history=[row[0].lower() for row in cur.fetchall()]
             combined=" ".join(history)
-            has_date=bool(re.search(r"\\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\\d{1,2}[/-]\\d{1,2}(?:[/-]\\d{2,4})?)\\b",combined))
-            has_guests=bool(re.search(r"\\b\\d{1,4}\\s*(?:guests?|people|persons?|attendees?)\\b",combined))
-            has_location=bool(re.search(r"\\b(?:at|in|venue|location|address|city|town)\\s+[a-z]",combined))
+            has_date=bool(re.search(r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b",combined))
+            has_guests=bool(re.search(r"\b\d{1,4}\s*(?:guests?|people|persons?|attendees?)\b",combined))
+            has_location=bool(re.search(r"\b(?:at|in|venue|location|address|city|town)\s+[a-z]",combined))
             if not has_date:
                 reply="Hi, this is Savannah with Culinary Creations Catering. What date is your event? Reply STOP to opt out."
             elif not has_guests:
