@@ -286,6 +286,22 @@ async def savannah_sms_inbound(request:Request):
             cur.execute("""INSERT INTO public.catering_savannah_sms(message_sid,sender,recipient,body)
                 VALUES (%s,%s,%s,%s) ON CONFLICT (message_sid) DO NOTHING""",(sid,sender,recipient,body))
     from fastapi.responses import Response
+    # An immediate TwiML response acknowledges an inquiry without promising
+    # an unverified quote, date, or booking. Twilio sends it as the SMS reply.
+    # A2P 10DLC registration and carrier restrictions may prevent delivery.
+    # Keep replies opt-in until registration and delivery are verified.
+    if os.environ.get("CULINARY_SAVANNAH_SMS_AUTO_REPLY","false").lower()=="true" and body.strip():
+        incoming=body.strip().lower()
+        if incoming in ("stop","stopall","unsubscribe","cancel","end","quit"):
+            return Response('<Response></Response>',media_type="application/xml")
+        if incoming in ("help","info"):
+            reply="Culinary Creations Catering: Tell us your event date, location, guest count, and catering needs. Reply STOP to opt out."
+        else:
+            reply=("Thank you for contacting Culinary Creations Catering! "
+                   "Please share your event date, location, approximate guest count, "
+                   "and the catering service you need. Our team will review your request. "
+                   "Reply STOP to opt out.")
+        return Response('<Response><Message>'+escape(reply)+'</Message></Response>',media_type="application/xml")
     return Response('<Response></Response>',media_type="application/xml")
 
 @app.get("/api/admin/savannah-sms")
