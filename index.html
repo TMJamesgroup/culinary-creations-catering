@@ -75,7 +75,7 @@ async function savannahOwnerAsk(e){
  const append=(who,message)=>{const p=document.createElement('p');const strong=document.createElement('strong');strong.textContent=who+': ';p.append(strong,document.createTextNode(message));box.appendChild(p);box.scrollTop=box.scrollHeight};
  append('You',question);
  try{
-  const result=await ownerCall('/api/admin/savannah/chat',{message:question,history:savannahOwnerHistory});
+  const result=await ownerCall('/api/admin/savannah/chat','POST',{message:question,history:savannahOwnerHistory});
   append('Savannah',result.reply);
   savannahOwnerHistory.push({role:'user',content:question},{role:'assistant',content:result.reply});
   savannahOwnerHistory=savannahOwnerHistory.slice(-10);
