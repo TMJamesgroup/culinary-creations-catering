@@ -442,6 +442,53 @@ def admin_login(a:Account,request:Request):
     data="admin:1:"+str(int(time.time()+8*3600))
     signature=hmac.new(ADMIN_TOKEN.encode(),data.encode(),hashlib.sha256).hexdigest()
     return {"token":base64.urlsafe_b64encode((data+":"+signature).encode()).decode(),"name":"Culinary Creations Management"}
+class SavannahOwnerQuestion(BaseModel):
+    message: str = Field(min_length=1,max_length=1500)
+    history: list[dict] = Field(default_factory=list,max_length=12)
+
+@app.post("/api/admin/savannah/chat")
+def savannah_owner_chat(q:SavannahOwnerQuestion,request:Request):
+    """Authenticated owner-only operational assistant; read-only, no automatic actions."""
+    admin_auth(request)
+    throttle(request,"savannah_owner_chat",25,300)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id,kind,payload,status,created_at
+                FROM public.catering_inquiries ORDER BY created_at DESC LIMIT 35""")
+            inquiries=[{"id":x[0],"kind":x[1],"customer":str(x[2].get("client") or x[2].get("business") or "Customer")[:80],
+                        "status":x[3],"date":str(x[2].get("date",""))[:30],
+                        "guests":str(x[2].get("guests",""))[:20],
+                        "created_at":x[4].isoformat()} for x in cur.fetchall()]
+            ensure_crm(cur)
+            cur.execute("""SELECT title,status,event_date FROM public.catering_crm_projects ORDER BY id DESC LIMIT 35""")
+            projects=[{"title":x[0],"status":x[1],"event_date":str(x[2] or "")} for x in cur.fetchall()]
+    pending=sum(x["status"] in ("new","reviewing","requested") for x in inquiries)
+    context={"recent_inquiries":inquiries,"recent_projects":projects,"pending_inquiries":pending}
+    key=os.environ.get("OPENAI_API_KEY","")
+    if not key:
+        return {"reply":f"Savannah here. I found {len(inquiries)} recent inquiries, including {pending} needing review, and {len(projects)} recent projects. I can summarize these records, but interactive AI responses need the server-side AI integration enabled.","mode":"summary"}
+    try:
+        import urllib.request
+        instructions=("You are Savannah, Culinary Creations Catering's interactive AI general manager speaking privately to the authenticated business owner. "
+            "Give concise, proactive operational analysis grounded only in the supplied live database snapshot. "
+            "Discuss inquiries, follow-ups, events, staffing planning, and suggested priorities. "
+            "Distinguish confirmed records from recommendations and missing information. "
+            "Do not claim you emailed, texted, changed records, booked events, took payments or performed background actions. "
+            "Do not expose credentials. You are currently read-only. Ask a focused follow-up question when helpful.")
+        messages=[{"role":"system","content":instructions+"\\nBusiness snapshot: "+json.dumps(context,default=str)}]
+        for item in q.history[-8:]:
+            if isinstance(item,dict) and item.get("role") in ("user","assistant") and isinstance(item.get("content"),str):
+                messages.append({"role":item["role"],"content":item["content"][:1200]})
+        messages.append({"role":"user","content":q.message})
+        payload=json.dumps({"model":os.environ.get("CULINARY_AI_MODEL","gpt-4o-mini"),"messages":messages,"temperature":0.3,"max_tokens":500}).encode()
+        req=urllib.request.Request("https://api.openai.com/v1/chat/completions",data=payload,headers={"Authorization":"Bearer "+key,"Content-Type":"application/json"},method="POST")
+        with urllib.request.urlopen(req,timeout=18) as response:
+            result=json.load(response)
+        reply=result["choices"][0]["message"]["content"]
+        return {"reply":reply,"mode":"ai"}
+    except Exception:
+        raise HTTPException(503,"Savannah AI is temporarily unavailable; inquiry records remain accessible")
+
 class StatusUpdate(BaseModel):
     status: str
 @app.get("/api/admin/worklist")
