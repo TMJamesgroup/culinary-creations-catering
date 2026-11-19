@@ -1,4 +1,5 @@
 import os, json, time, secrets, hashlib, hmac, base64, re
+from pathlib import Path
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,48 @@ app = FastAPI(title="Culinary Creations Inquiries", docs_url=None, redoc_url=Non
 app.add_middleware(CORSMiddleware, allow_origins=["https://culinary-creations-catering.onrender.com","https://culinary-creations-product-demo.onrender.com"], allow_methods=["POST","GET","PUT","PATCH"], allow_headers=["Content-Type","Authorization"])
 DATABASE_URL=os.environ["DATABASE_URL"]
 ADMIN_TOKEN=os.environ["ADMIN_TOKEN"]
+PRIVACY_VERSION=os.environ.get("TAP3_PRIVACY_VERSION","DRAFT-2026-11-19")
+PRIVACY_SHA256=hashlib.sha256((Path(__file__).resolve().parent.parent/"tap3-privacy-policy-draft.html").read_bytes()).hexdigest()
+PRIVACY_ORIGINS={"https://culinary-creations-catering.onrender.com","https://culinary-creations-product-demo.onrender.com","https://tmj-command-center.onrender.com"}
+_privacy_schema_ready=False
+def ensure_privacy_schema():
+    global _privacy_schema_ready
+    if _privacy_schema_ready:return
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            conn.execute('''CREATE TABLE IF NOT EXISTS public.catering_privacy_acknowledgments(
+                principal_type TEXT NOT NULL CHECK(principal_type IN ('customer','admin')),
+                principal_id BIGINT NOT NULL, policy_version TEXT NOT NULL, policy_sha256 TEXT NOT NULL,
+                acknowledged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY(principal_type,principal_id,policy_version,policy_sha256))''')
+        _privacy_schema_ready=True
+    except Exception:
+        raise HTTPException(503,"Privacy acknowledgment storage unavailable")
+def privacy_status(principal_type,principal_id):
+    ensure_privacy_schema()
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            row=conn.execute('''SELECT acknowledged_at FROM public.catering_privacy_acknowledgments
+                WHERE principal_type=%s AND principal_id=%s AND policy_version=%s AND policy_sha256=%s''',
+                (principal_type,principal_id,PRIVACY_VERSION,PRIVACY_SHA256)).fetchone()
+        return {"version":PRIVACY_VERSION,"policy_sha256":PRIVACY_SHA256,"acknowledged":bool(row),
+                "acknowledged_at":row[0].isoformat() if row else None}
+    except Exception:
+        raise HTTPException(503,"Privacy acknowledgment lookup unavailable")
+def privacy_record(request,principal_type,principal_id,version,confirmed):
+    if request.headers.get("origin","") not in PRIVACY_ORIGINS:raise HTTPException(403,"Approved website origin required")
+    if confirmed is not True or version!=PRIVACY_VERSION:raise HTTPException(400,"Current privacy policy acknowledgment required")
+    ensure_privacy_schema()
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            conn.execute('''INSERT INTO public.catering_privacy_acknowledgments(principal_type,principal_id,policy_version,policy_sha256)
+                VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING''',(principal_type,principal_id,PRIVACY_VERSION,PRIVACY_SHA256))
+    except Exception:
+        raise HTTPException(503,"Privacy acknowledgment could not be saved")
+    return privacy_status(principal_type,principal_id)
+class PrivacyAcknowledgment(BaseModel):
+    version:str
+    confirmed:bool=False
 _recent={}
 _rate_hits={}
 @app.middleware("http")
@@ -163,8 +206,20 @@ def account_id(request):
         data=ident+":"+expiry
         valid=hmac.new(ADMIN_TOKEN.encode(),data.encode(),hashlib.sha256).hexdigest()
         if int(expiry)<time.time() or not secrets.compare_digest(signature,valid): raise ValueError()
-        return int(ident)
+        principal=int(ident)
     except Exception: raise HTTPException(401,"Sign in required")
+    if request.url.path not in ("/api/customer/privacy/status","/api/customer/privacy/acknowledge"):
+        if not privacy_status("customer",principal)["acknowledged"]:raise HTTPException(428,"Privacy policy acknowledgment required")
+    return principal
+@app.get("/api/customer/privacy/status")
+def customer_privacy_status(request:Request):
+    principal=account_id(request)
+    return privacy_status("customer",principal)
+@app.post("/api/customer/privacy/acknowledge")
+def customer_privacy_acknowledge(request:Request,data:PrivacyAcknowledgment):
+    principal=account_id(request)
+    return privacy_record(request,"customer",principal,data.version,data.confirmed)
+
 class ActivateAccount(BaseModel):
     email: str
     password: str
@@ -412,8 +467,18 @@ def admin_id(request):
         message="admin:"+ident+":"+expiry
         expected=hmac.new(ADMIN_TOKEN.encode(),message.encode(),hashlib.sha256).hexdigest()
         if prefix!="admin" or int(expiry)<time.time() or not secrets.compare_digest(signature,expected): raise ValueError()
-        return int(ident)
+        principal=int(ident)
     except Exception: raise HTTPException(401,"Management sign-in required")
+    if request.url.path not in ("/api/admin/privacy/status","/api/admin/privacy/acknowledge"):
+        if not privacy_status("admin",principal)["acknowledged"]:raise HTTPException(428,"Management privacy policy acknowledgment required")
+    return principal
+@app.get("/api/admin/privacy/status")
+def management_privacy_status(request:Request):
+    return privacy_status("admin",admin_id(request))
+@app.post("/api/admin/privacy/acknowledge")
+def management_privacy_acknowledge(request:Request,data:PrivacyAcknowledgment):
+    return privacy_record(request,"admin",admin_id(request),data.version,data.confirmed)
+
 def admin_auth(request):
     admin_id(request)
 def verify_owner_totp(code,secret):

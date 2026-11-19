@@ -1,0 +1,42 @@
+name: Catering privacy acknowledgment checks
+on:
+  pull_request:
+  push:
+    paths:
+      - 'backend/app.py'
+      - 'portal.html'
+      - 'index.html'
+      - 'privacy-gate.js'
+      - 'tap3-privacy-policy-draft.html'
+      - '.github/workflows/privacy-checks.yml'
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check API syntax
+        run: python -m py_compile backend/app.py
+      - name: Check browser privacy gate syntax
+        run: node --check privacy-gate.js
+      - name: Check versioned acknowledgment routes and owner/customer separation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          source=Path('backend/app.py').read_text()
+          assert '/api/customer/privacy/status' in source
+          assert '/api/admin/privacy/status' in source
+          assert 'principal_type' in source and "'customer','admin'" in source
+          assert 'PRIVACY_SHA256' in source and 'HTTPException(428' in source
+          assert "clientIp" not in source
+          assert Path('tap3-privacy-policy-draft.html').stat().st_size>30000
+          assert "CCPrivacy.ensure" in Path('index.html').read_text()
+          assert "CCPrivacy.ensure" in Path('portal.html').read_text()
+          PY
