@@ -13,7 +13,7 @@ DATABASE_URL=os.environ["DATABASE_URL"]
 ADMIN_TOKEN=os.environ["ADMIN_TOKEN"]
 PRIVACY_VERSION=os.environ.get("TAP3_PRIVACY_VERSION","DRAFT-2026-11-19")
 PRIVACY_SHA256=hashlib.sha256((Path(__file__).resolve().parent.parent/"tap3-privacy-policy-draft.html").read_bytes()).hexdigest()
-PRIVACY_ORIGINS={"https://culinary-creations-catering.onrender.com","https://culinary-creations-product-demo.onrender.com"}
+PRIVACY_ORIGINS={"https://culinary-creations-catering.onrender.com","https://culinary-creations-product-demo.onrender.com","https://tmj-command-center.onrender.com"}
 _privacy_schema_ready=False
 def ensure_privacy_schema():
     global _privacy_schema_ready
